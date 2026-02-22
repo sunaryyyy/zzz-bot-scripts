@@ -116,8 +116,14 @@ if (-not $cacheFile) {
 
 Write-Host "Fichier cache : $cacheFile" -ForegroundColor Green
 
-# Lire le fichier (binaire -> texte pour regex)
-$bytes = [System.IO.File]::ReadAllBytes($cacheFile)
+# Copier vers un fichier temporaire puis lire (le jeu garde le fichier ouvert)
+$tempPath = [System.IO.Path]::GetTempFileName()
+try {
+    Copy-Item -LiteralPath $cacheFile -Destination $tempPath -Force
+    $bytes = [System.IO.File]::ReadAllBytes($tempPath)
+} finally {
+    if (Test-Path $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+}
 $text = [System.Text.Encoding]::UTF8.GetString($bytes)
 
 # Chercher une URL getGachaLog avec authkey (plusieurs patterns)
