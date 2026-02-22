@@ -116,11 +116,19 @@ if (-not $cacheFile) {
 
 Write-Host "Fichier cache : $cacheFile" -ForegroundColor Green
 
-# Copier vers un fichier temporaire puis lire (le jeu garde le fichier ouvert)
+# Lire le cache : copie vers temp, ou lecture en partage si le jeu a le fichier ouvert
+$bytes = $null
 $tempPath = [System.IO.Path]::GetTempFileName()
 try {
-    Copy-Item -LiteralPath $cacheFile -Destination $tempPath -Force
+    Copy-Item -LiteralPath $cacheFile -Destination $tempPath -Force -ErrorAction Stop
     $bytes = [System.IO.File]::ReadAllBytes($tempPath)
+} catch {
+    # Fichier verrouillé par le jeu : ouvrir en lecture partagée (FileShare.Read)
+    $fs = [System.IO.File]::Open($cacheFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $bytes = New-Object byte[] $fs.Length
+        [void]$fs.Read($bytes, 0, $bytes.Length)
+    } finally { $fs.Close() }
 } finally {
     if (Test-Path $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
 }
