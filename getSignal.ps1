@@ -134,38 +134,62 @@ try {
 }
 $text = [System.Text.Encoding]::UTF8.GetString($bytes)
 
-# Chercher une URL getGachaLog avec authkey (plusieurs patterns)
-$url = $null
-$patterns = @(
-    'https://[a-zA-Z0-9\-\.]+/[a-zA-Z0-9_/\-]*getGachaLog[^"\s<>]*authkey=[^\s"<>]+',
-    'https://[a-zA-Z0-9\-\.]+/[a-zA-Z0-9_/\-]*[?&]authkey=[^\s"<>]+',
-    'https://(webstatic[^"\s]*|public-operation[^"\s]*)[^\s"<>]*authkey=[^\s"<>]+'
-)
-foreach ($p in $patterns) {
-    $m = [regex]::Match($text, $p)
-    if ($m.Success) {
-        $url = $m.Value
-        # Enlever caracteres de controle / null a la fin
-        $url = $url -replace '[\x00-\x1f]+$', ''
-        if ($url.Length -gt 50) { break }
+# Extraire TOUTES les URLs getGachaLog (le cache peut en contenir plusieurs, les plus recentes a la fin)
+# Methode 1: comme getZZZHistoryURL.ps1 - split par 1/0/, parcourir de la fin vers le debut
+$candidates = [System.Collections.Generic.List[string]]::new()
+$chunks = $text -split '1/0/'
+for ($i = $chunks.Count - 1; $i -ge 0; $i--) {
+    $chunk = $chunks[$i]
+    $line = ($chunk -split "\0")[0]
+    if ($line -and $line.Trim().StartsWith('http') -and $line.Contains('getGachaLog') -and $line.Contains('authkey=')) {
+        $u = $line.Trim() -replace '[\x00-\x1f]+$', ''
+        if ($u.Length -gt 80 -and $candidates -notcontains $u) { $candidates.Add($u) }
     }
 }
 
-# Fallback : chercher "getGachaLog" puis "authkey=" dans le binaire pour extraire l'URL
-if (-not $url) {
-    $str = [System.Text.Encoding]::ASCII.GetString($bytes)
-    $idx = $str.LastIndexOf("getGachaLog")
-    if ($idx -gt 0) {
-        $start = $str.LastIndexOf("https", $idx)
-        if ($start -ge 0 -and $idx -gt $start) {
-            $end = $idx + 500
-            $snippet = $str.Substring($start, [Math]::Min($end - $start, $str.Length - $start))
-            $m = [regex]::Match($snippet, 'https://[^\s\x00]+authkey=[^\s\x00]+')
-            if ($m.Success) {
-                $url = $m.Value -replace '[\x00-\x1f]+$', ''
-            }
-        }
+# Methode 2: regex sur tout le fichier (toutes les occurrences)
+if ($candidates.Count -eq 0) {
+    $pattern = 'https://[a-zA-Z0-9\-\.]+/[a-zA-Z0-9_/\-]*getGachaLog[^"\s<>]*authkey=[^\s"<>]+'
+    foreach ($m in [regex]::Matches($text, $pattern)) {
+        $u = $m.Value -replace '[\x00-\x1f]+$', ''
+        if ($u.Length -gt 80 -and $candidates -notcontains $u) { $candidates.Add($u) }
     }
+}
+if ($candidates.Count -eq 0) {
+    $pattern = 'https://[a-zA-Z0-9\-\.]+/[a-zA-Z0-9_/\-]*[?&]authkey=[^\s"<>]+'
+    foreach ($m in [regex]::Matches($text, $pattern)) {
+        $u = $m.Value -replace '[\x00-\x1f]+$', ''
+        if ($u.Length -gt 80 -and $u.Contains('gacha') -and $candidates -notcontains $u) { $candidates.Add($u) }
+    }
+}
+
+# Trier par timestamp= (le plus recent en premier) si present
+$candidates = $candidates | Sort-Object -Descending {
+    if ($_ -match 'timestamp=(\d+)') { [long]$matches[1] } else { 0 }
+}
+
+# Valider l'URL par un appel API (retcode=0 = authkey valide) - comme getZZZHistoryURL.ps1
+$url = $null
+foreach ($cand in $candidates) {
+    try {
+        $testUrl = $cand.Trim()
+        if (-not $testUrl.Contains('&end_id=')) { $testUrl += '&end_id=0' }
+        $r = Invoke-RestMethod -Uri $testUrl -Method Get -TimeoutSec 10 -ErrorAction Stop
+        if ($r.retcode -eq 0) {
+            $url = $cand.Trim() -replace '[\x00-\x1f]+$', ''
+            Write-Host "[INFO] URL validee par l'API (retcode=0)." -ForegroundColor DarkGray
+            break
+        }
+        Write-Host "[INFO] URL expiree (retcode $($r.retcode)), essai suivant..." -ForegroundColor DarkGray
+    } catch {
+        Write-Host "[INFO] URL invalide ou erreur reseau, essai suivant..." -ForegroundColor DarkGray
+    }
+}
+
+# Fallback: si aucune validee, prendre la plus recente (dernier candidat = dernier timestamp)
+if (-not $url -and $candidates.Count -gt 0) {
+    $url = ($candidates[0] -replace '[\x00-\x1f]+$', '').Trim()
+    Write-Host "[ATTENTION] Aucune URL validee par l'API. Utilisation de la plus recente du cache (peut etre expiree)." -ForegroundColor Yellow
 }
 
 if (-not $url -or $url.Length -lt 50) {
